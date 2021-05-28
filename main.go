@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,21 +14,32 @@ import (
 	"time"
 )
 
+var permittedProperties = []string{
+	"dewpoint",
+	"heatIndex",
+	"maxTemperature",
+	"minTemperature",
+	"pressure",
+	"probabilityOfPrecipitation",
+	"probabilityOfThunder",
+	"quantitativePrecipitation",
+	"relativeHumidity",
+	"skyCover",
+	"temperature",
+	"windChill",
+	"windDirection",
+	"windSpeed",
+}
+
 func main() {
-	var (
-		queryAddress string
-		properties   string
-	)
-
-	flag.StringVar(&queryAddress, "address", "", "the address at which to see the weather")
-	flag.StringVar(&properties, "properties", "temperature", "the weather properties to display, comma separated string")
-	flag.Parse()
-
-	fmt.Println("querying: ", queryAddress)
-
-	coordinates, err := getAddressCoordinates(queryAddress)
+	req, err := getForecastRequest(os.Args)
 	if err != nil {
-		panic(err)
+		errorAndQuit(err)
+	}
+
+	coordinates, err := getAddressCoordinates(req.address)
+	if err != nil {
+		errorAndQuit(err)
 	}
 
 	fmt.Println("lat: ", coordinates.latitude)
@@ -35,17 +47,92 @@ func main() {
 
 	forecastGridDataURL, err := getForecastGridDataURL(coordinates)
 	if err != nil {
-		panic(err)
+		errorAndQuit(err)
 	}
 
 	fmt.Println("forecastGridDataURL: ", forecastGridDataURL)
 
-	weatherData, err := getWeatherData(forecastGridDataURL, strings.Split(properties, ","))
+	weatherData, err := getWeatherData(forecastGridDataURL, req.properties)
 	if err != nil {
-		panic(err)
+		errorAndQuit(err)
 	}
 
-	display(weatherData, strings.Split(properties, ","), time.Now(), time.Now().Add(12*time.Hour))
+	display(req, weatherData)
+}
+
+type forecastRequest struct {
+	address         string
+	properties      []string
+	start           time.Time
+	end             time.Time
+	displayTimeZone *time.Location
+	freedom         bool
+}
+
+func getForecastRequest(args []string) (forecastRequest, error) {
+	flagset := flag.NewFlagSet(args[0], flag.ExitOnError)
+
+	var (
+		queryAddress string
+		properties   string
+		hours        int
+		offset       int
+		displaytz    string
+		freedom      bool
+	)
+
+	flagset.StringVar(&queryAddress, "address", "", "address at which to see the weather")
+	flagset.StringVar(&properties, "properties", "temperature", "weather properties to display in a comma separated string")
+	flagset.IntVar(&hours, "hours", 12, "number of hours of predictions to show")
+	flagset.IntVar(&offset, "offset", 0, "start predictions this many hours from now")
+	flagset.StringVar(&displaytz, "displaytz", "UTC", "time zone in which to display predictions")
+	flagset.BoolVar(&freedom, "freedom", false, "use freedom units")
+
+	flagset.Parse(args[1:])
+
+	loc, err := time.LoadLocation(displaytz)
+	if err != nil {
+		return forecastRequest{}, fmt.Errorf("could not load display timezone: %w", err)
+	}
+
+	start := time.Now().Add(time.Duration(offset) * time.Hour)
+	end := start.Add(time.Duration(hours) * time.Hour)
+
+	req := forecastRequest{
+		address:         queryAddress,
+		properties:      strings.Split(properties, ","),
+		start:           start,
+		end:             end,
+		displayTimeZone: loc,
+		freedom:         freedom,
+	}
+
+	if req.address == "" {
+		return forecastRequest{}, fmt.Errorf("address cannot be empty")
+	}
+
+	for _, p := range req.properties {
+		if !containsString(permittedProperties, p) {
+			return forecastRequest{}, fmt.Errorf("requested property '%s' is not in %v", p, permittedProperties)
+		}
+	}
+
+	return req, nil
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, v := range haystack {
+		if needle == v {
+			return true
+		}
+	}
+
+	return false
+}
+
+func errorAndQuit(err error) {
+	fmt.Println("agcw encountered an error: ", err.Error())
+	os.Exit(1)
 }
 
 type coordinates struct {
@@ -136,13 +223,7 @@ type weatherPoint struct {
 	StartTime time.Time
 	EndTime   time.Time
 	Value     float64
-	Unit      unit
-}
-
-type unit string
-
-func (u unit) String() string {
-	return string(u)
+	Unit      string
 }
 
 func getWeatherData(forecastGridDataURL string, requestedProperties []string) (map[string][]weatherPoint, error) {
@@ -186,11 +267,6 @@ func getWeatherData(forecastGridDataURL string, requestedProperties []string) (m
 			return nil, fmt.Errorf("error parsing requested property '%s': %w", name, err)
 		}
 
-		uom, err := parseUnitOfMeasurement(raw.UnitOfMeasurement)
-		if err != nil {
-			return nil, fmt.Errorf("could not parse unit: %w", err)
-		}
-
 		points := []weatherPoint{}
 
 		for _, v := range raw.Values {
@@ -200,7 +276,7 @@ func getWeatherData(forecastGridDataURL string, requestedProperties []string) (m
 			}
 
 			points = append(points, weatherPoint{
-				Unit:      uom,
+				Unit:      raw.UnitOfMeasurement,
 				StartTime: start,
 				EndTime:   end,
 				Value:     v.Value,
@@ -221,14 +297,37 @@ type displayRow struct {
 	values []string
 }
 
-func display(weatherData map[string][]weatherPoint, properties []string, start time.Time, end time.Time) {
+func formatWeatherValue(p weatherPoint, freedom bool) string {
+	return fmt.Sprintf("%5.5g %s", p.Value, displayUnit(p.Unit))
+}
+
+func displayUnit(unit string) string {
+	switch unit {
+	case "wmoUnit:degC":
+		return "C"
+	case "wmoUnit:km_h-1":
+		return "kph"
+	case "wmoUnit:percent":
+		return "%"
+	case "wmoUnit:mm":
+		return "mm"
+	case "wmoUnit:m":
+		return "m"
+	case "wmoUnit:degree_(angle)":
+		return "deg"
+	default:
+		return unit
+	}
+}
+
+func display(req forecastRequest, weatherData map[string][]weatherPoint) {
 	idx := map[string]int{}
-	for _, p := range properties {
+	for _, p := range req.properties {
 		idx[p] = 0
 	}
 
-	start = start.Truncate(time.Hour)
-	end = end.Truncate(time.Hour)
+	start := req.start.Truncate(time.Hour)
+	end := req.end.Truncate(time.Hour)
 
 	if start.After(end) {
 		panic("display start time after end time")
@@ -244,7 +343,7 @@ func display(weatherData map[string][]weatherPoint, properties []string, start t
 			values: []string{},
 		}
 
-		for _, property := range properties {
+		for _, property := range req.properties {
 			// fmt.Println("DEBUG: PROP: ", property)
 			points := weatherData[property]
 			for idx[property] < len(points) {
@@ -256,7 +355,7 @@ func display(weatherData map[string][]weatherPoint, properties []string, start t
 				// fmt.Println("cmp: ", cmp)
 
 				if cmp == 0 {
-					row.values = append(row.values, fmt.Sprintf("%05.2f %s", p.Value, p.Unit))
+					row.values = append(row.values, formatWeatherValue(p, req.freedom))
 					break
 				}
 
@@ -272,22 +371,45 @@ func display(weatherData map[string][]weatherPoint, properties []string, start t
 		rows = append(rows, row)
 	}
 
-	fmt.Printf("time")
-	for _, p := range properties {
-		fmt.Printf(" | %s", p)
-	}
+	fmtstr, bar := getFormatString(req.properties)
 
-	fmt.Printf("\n")
-	fmt.Printf("------------------\n")
+	fmt.Printf(fmtstr, append([]interface{}{"time"}, toiface(req.properties)...)...)
+	fmt.Println(bar)
 
 	for _, r := range rows {
-		fmt.Printf(r.at.Format(time.Stamp))
-		for _, v := range r.values {
-			fmt.Printf(" | %s", v)
+		fmt.Printf(fmtstr, append([]interface{}{r.at.In(req.displayTimeZone).Format(time.Stamp)}, toiface(r.values)...)...)
+	}
+}
+
+func toiface(ss []string) []interface{} {
+	is := make([]interface{}, len(ss))
+	for i, v := range ss {
+		is[i] = v
+	}
+
+	return is
+}
+
+func getFormatString(properties []string) (string, string) {
+	fmtstr := " %15.15s"
+
+	totwidth := 16
+
+	for _, p := range properties {
+		fmtstr += " | "
+
+		width := len(p)
+		if width < 15 {
+			width = 15
 		}
 
-		fmt.Printf("\n")
+		fmtstr += fmt.Sprint("%", width, ".", width, "s")
+		totwidth += 3 + width
 	}
+
+	fmtstr += "\n"
+
+	return fmtstr, strings.Repeat("-", totwidth)
 }
 
 // negative if test is before start
@@ -308,13 +430,6 @@ func compareTimeToRange(test, start, end time.Time) int {
 	}
 
 	return 0
-}
-
-func parseUnitOfMeasurement(unitOfMeasurement string) (unit, error) {
-	// this is going to do more eventually
-	// so sue me sandi metz
-
-	return unit(unitOfMeasurement), nil
 }
 
 func parseTimeRange(validTime string) (time.Time, time.Time, error) {
