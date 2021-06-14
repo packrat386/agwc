@@ -222,7 +222,7 @@ func getForecastGridDataURL(c coordinates) (string, error) {
 type weatherPoint struct {
 	StartTime time.Time
 	EndTime   time.Time
-	Value     float64
+	Value     *float64
 	Unit      string
 }
 
@@ -252,8 +252,8 @@ func getWeatherData(forecastGridDataURL string, requestedProperties []string) (m
 		raw := struct {
 			UnitOfMeasurement string `json:"uom"`
 			Values            []struct {
-				ValidTime string  `json:"validTime"`
-				Value     float64 `json:"value"`
+				ValidTime string   `json:"validTime"`
+				Value     *float64 `json:"value"`
 			} `json:"values"`
 		}{}
 
@@ -302,24 +302,36 @@ func formatWeatherValue(p weatherPoint, freedom bool) string {
 		p = liberate(p)
 	}
 
-	return fmt.Sprintf("%5.5g %s", p.Value, displayUnit(p.Unit))
+	if p.Value == nil {
+		return "No Data"
+	}
+
+	return fmt.Sprintf("%5.5g %s", *p.Value, displayUnit(p.Unit))
 }
 
 func liberate(p weatherPoint) weatherPoint {
+	if p.Value == nil {
+		return p
+	}
+
 	f := weatherPoint{StartTime: p.StartTime, EndTime: p.EndTime}
 
 	switch p.Unit {
 	case "wmoUnit:degC":
-		f.Value = ((p.Value * 9.0) / 5.0) + 32
+		v := ((*p.Value * 9.0) / 5.0) + 32
+		f.Value = &v
 		f.Unit = "F"
 	case "wmoUnit:km_h-1":
-		f.Value = p.Value * 0.621371
+		v := *p.Value * 0.621371
+		f.Value = &v
 		f.Unit = "mph"
 	case "wmoUnit:mm":
-		f.Value = p.Value * 0.0393701
+		v := *p.Value * 0.0393701
+		f.Value = &v
 		f.Unit = "in"
 	case "wmoUnit:m":
-		f.Value = p.Value * 3.28084
+		v := *p.Value * 3.28084
+		f.Value = &v
 		f.Unit = "ft"
 	default:
 		f.Value = p.Value
