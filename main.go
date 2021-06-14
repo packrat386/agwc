@@ -298,7 +298,35 @@ type displayRow struct {
 }
 
 func formatWeatherValue(p weatherPoint, freedom bool) string {
+	if freedom {
+		p = liberate(p)
+	}
+
 	return fmt.Sprintf("%5.5g %s", p.Value, displayUnit(p.Unit))
+}
+
+func liberate(p weatherPoint) weatherPoint {
+	f := weatherPoint{StartTime: p.StartTime, EndTime: p.EndTime}
+
+	switch p.Unit {
+	case "wmoUnit:degC":
+		f.Value = ((p.Value * 9.0) / 5.0) + 32
+		f.Unit = "F"
+	case "wmoUnit:km_h-1":
+		f.Value = p.Value * 0.621371
+		f.Unit = "mph"
+	case "wmoUnit:mm":
+		f.Value = p.Value * 0.0393701
+		f.Unit = "in"
+	case "wmoUnit:m":
+		f.Value = p.Value * 3.28084
+		f.Unit = "ft"
+	default:
+		f.Value = p.Value
+		f.Unit = p.Unit
+	}
+
+	return f
 }
 
 func displayUnit(unit string) string {
